@@ -49,7 +49,7 @@ export async function POST(request: NextRequest) {
         pointsEarned: result.pointsEarned,
         recommendation: result.recommendation,
         shouldReviewLesson: result.shouldReviewLesson,
-        needsRemediation: result.needsRemediaton,
+        needsRemediation: result.needsRemediation,
       },
     });
   } catch (error) {
