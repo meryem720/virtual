@@ -1,0 +1,636 @@
+// ============================================================
+// ÉCOLE VIRTUELLE CE2 - SCHEMA PRISMA
+// ============================================================
+// Modèles de données pour une plateforme éducative multi-rôles
+// avec suivi personnalisé des compétences et moteur d'adaptation
+// ============================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================================
+// AUTHENTIFICATION & UTILISATEURS
+// ============================================================
+
+/// Modèle principal pour tous les utilisateurs de la plateforme
+/// Compatible avec NextAuth pour gérer l'authentification
+model User {
+  id            String    @id @default(cuid())
+  email         String    @unique
+  emailVerified DateTime?
+  name          String?
+  image         String?
+  password      String? // Hash du mot de passe (optionnel si OAuth)
+  
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations NextAuth
+  accounts      Account[]
+  sessions      Session[]
+
+  // Rôles multiples (un user peut être parent ET professeur)
+  roles         UserRole[]
+
+  // Profils spécifiques selon le rôle
+  studentProfile  StudentProfile?
+  teacherProfile  TeacherProfile?
+  parentProfile   ParentProfile?
+
+  // Activité
+  attempts        Attempt[]
+  evaluations     Evaluation[]
+  recommendations Recommendation[]
+
+  @@index([email])
+}
+
+/// Comptes externes pour l'authentification OAuth (NextAuth)
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+  @@index([userId])
+}
+
+/// Sessions utilisateurs (NextAuth)
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+/// Tokens de vérification (NextAuth)
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+}
+
+// ============================================================
+// RÔLES & PERMISSIONS
+// ============================================================
+
+enum RoleType {
+  ELEVE       // Élève (enfant CE2)
+  PARENT      // Parent ou tuteur légal
+  PROFESSEUR  // Enseignant
+  DIRECTEUR   // Directeur d'établissement
+  ADMIN       // Administrateur système
+}
+
+/// Association entre utilisateurs et rôles (relation many-to-many)
+/// Permet à un utilisateur d'avoir plusieurs rôles
+model UserRole {
+  id     String   @id @default(cuid())
+  userId String
+  role   RoleType
+
+  assignedAt DateTime @default(now())
+  assignedBy String? // ID de l'admin qui a assigné le rôle
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, role])
+  @@index([userId])
+  @@index([role])
+}
+
+// ============================================================
+// PROFILS SPÉCIFIQUES
+// ============================================================
+
+/// Profil élève avec informations pédagogiques
+/// Pour les enfants de CE2 (8-9 ans)
+model StudentProfile {
+  id     String @id @default(cuid())
+  userId String @unique
+
+  // Informations personnelles
+  firstName String
+  lastName  String
+  birthDate DateTime
+  avatar    String? // URL de l'avatar personnalisé
+
+  // Paramètres de difficulté adaptatifs
+  difficultyLevel    Int     @default(50) // 0-100
+  adaptationSpeed    Float   @default(1.0) // Vitesse d'adaptation (0.5 = lent, 2.0 = rapide)
+  needsAccessibility Boolean @default(false) // Besoins spécifiques (dyslexie, etc.)
+
+  // Statistiques globales
+  totalPoints      Int @default(0)
+  currentStreak    Int @default(0) // Jours consécutifs de connexion
+  longestStreak    Int @default(0)
+  lastActivityDate DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // Relations
+  enrollments      Enrollment[]
+  parentLinks      ParentChildLink[] @relation("ChildLinks")
+  attempts         Attempt[]
+  progress         Progress[]
+  evaluations      Evaluation[]
+  recommendations  Recommendation[]
+
+  @@index([userId])
+}
+
+/// Profil enseignant
+model TeacherProfile {
+  id     String @id @default(cuid())
+  userId String @unique
+
+  firstName   String
+  lastName    String
+  specialties String[] // ["Mathématiques", "Français"]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // Relations
+  classesManaged ClassGroup[]
+  subjectsCreated Subject[]
+  lessonsCreated  Lesson[]
+  exercisesCreated Exercise[]
+  evaluationsGiven Evaluation[]
+
+  @@index([userId])
+}
+
+/// Profil parent avec accès aux enfants
+model ParentProfile {
+  id     String @id @default(cuid())
+  userId String @unique
+
+  firstName String
+  lastName  String
+  phone     String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // Relations
+  childLinks ParentChildLink[] @relation("ParentLinks")
+
+  @@index([userId])
+}
+
+/// Lien parent-enfant avec niveau d'accès
+/// Permet plusieurs parents pour un enfant (famille recomposée)
+model ParentChildLink {
+  id       String @id @default(cuid())
+  parentId String
+  childId  String
+
+  relationship String // "Mère", "Père", "Tuteur", etc.
+  canViewProgress Boolean @default(true)
+  canReceiveNotifications Boolean @default(true)
+
+  createdAt DateTime @default(now())
+
+  parent ParentProfile  @relation("ParentLinks", fields: [parentId], references: [id], onDelete: Cascade)
+  child  StudentProfile @relation("ChildLinks", fields: [childId], references: [id], onDelete: Cascade)
+
+  @@unique([parentId, childId])
+  @@index([parentId])
+  @@index([childId])
+}
+
+// ============================================================
+// STRUCTURE PÉDAGOGIQUE
+// ============================================================
+
+/// Classe/Groupe d'élèves
+/// Ex: "CE2-A", "CE2-B"
+model ClassGroup {
+  id          String  @id @default(cuid())
+  name        String // "CE2-A 2025-2026"
+  description String?
+  schoolYear  String // "2025-2026"
+  teacherId   String
+
+  isActive Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  teacher TeacherProfile @relation(fields: [teacherId], references: [id])
+
+  // Relations
+  enrollments Enrollment[]
+
+  @@index([teacherId])
+  @@index([schoolYear])
+}
+
+/// Inscription d'un élève dans une classe
+model Enrollment {
+  id        String @id @default(cuid())
+  studentId String
+  classId   String
+
+  enrolledAt DateTime @default(now())
+  status     EnrollmentStatus @default(ACTIVE)
+
+  student StudentProfile @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  class   ClassGroup     @relation(fields: [classId], references: [id], onDelete: Cascade)
+
+  @@unique([studentId, classId])
+  @@index([studentId])
+  @@index([classId])
+}
+
+enum EnrollmentStatus {
+  ACTIVE    // Actuellement inscrit
+  COMPLETED // Année terminée
+  DROPPED   // Abandon
+}
+
+// ============================================================
+// CONTENU PÉDAGOGIQUE
+// ============================================================
+
+/// Matière scolaire
+/// Ex: "Mathématiques", "Français", "Sciences"
+model Subject {
+  id          String  @id @default(cuid())
+  name        String
+  description String?
+  icon        String? // Emoji ou URL icône
+  color       String? // Code couleur hex
+  order       Int     @default(0) // Ordre d'affichage
+
+  createdById String
+  createdBy   TeacherProfile @relation(fields: [createdById], references: [id])
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations
+  skills   Skill[]
+  lessons  Lesson[]
+
+  @@index([createdById])
+}
+
+/// Compétence à acquérir (granularité fine)
+/// Ex: "Additionner deux nombres à 2 chiffres"
+model Skill {
+  id          String  @id @default(cuid())
+  subjectId   String
+  name        String
+  description String?
+  
+  // Hiérarchie (compétence parent-enfant)
+  parentSkillId String?
+  parentSkill   Skill?  @relation("SkillHierarchy", fields: [parentSkillId], references: [id])
+  childSkills   Skill[] @relation("SkillHierarchy")
+
+  // Niveau de difficulté cible
+  difficultyLevel Int @default(50) // 0-100
+
+  order Int @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  subject Subject @relation(fields: [subjectId], references: [id], onDelete: Cascade)
+
+  // Relations
+  exercises Exercise[]
+  progress  Progress[]
+
+  @@index([subjectId])
+  @@index([parentSkillId])
+}
+
+/// Leçon (contenu théorique)
+/// Ex: "Les additions à 2 chiffres"
+model Lesson {
+  id          String  @id @default(cuid())
+  subjectId   String
+  title       String
+  description String?
+  content     String  @db.Text // Contenu JSON ou Markdown
+
+  // Médias
+  thumbnailUrl String?
+  videoUrl     String?
+
+  // Durée estimée en minutes
+  estimatedDuration Int @default(10)
+
+  order Int @default(0)
+
+  createdById String
+  createdBy   TeacherProfile @relation(fields: [createdById], references: [id])
+
+  isPublished Boolean @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  subject Subject @relation(fields: [subjectId], references: [id], onDelete: Cascade)
+
+  // Relations
+  exercises Exercise[]
+
+  @@index([subjectId])
+  @@index([createdById])
+}
+
+/// Exercice interactif
+/// Ex: QCM, glisser-déposer, remplir les blancs
+model Exercise {
+  id          String  @id @default(cuid())
+  lessonId    String?
+  skillId     String
+  title       String
+  instructions String
+
+  // Type d'exercice
+  type ExerciseType
+
+  // Configuration de l'exercice (JSON)
+  // Contient questions, réponses, options selon le type
+  config Json
+
+  // Difficulté et points
+  difficultyLevel Int @default(50) // 0-100
+  points          Int @default(10) // Points attribués si réussi
+
+  // Paramètres moteur adaptatif
+  minAttempts Int @default(1) // Tentatives min avant validation
+  maxAttempts Int @default(3) // Tentatives max autorisées
+
+  order Int @default(0)
+
+  createdById String
+  createdBy   TeacherProfile @relation(fields: [createdById], references: [id])
+
+  isPublished Boolean @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  lesson Lesson? @relation(fields: [lessonId], references: [id], onDelete: SetNull)
+  skill  Skill   @relation(fields: [skillId], references: [id], onDelete: Cascade)
+
+  // Relations
+  attempts Attempt[]
+
+  @@index([lessonId])
+  @@index([skillId])
+  @@index([createdById])
+}
+
+enum ExerciseType {
+  QCM              // Questions à choix multiples
+  QCU              // Question à choix unique
+  DRAG_DROP        // Glisser-déposer
+  FILL_BLANKS      // Remplir les blancs
+  ORDER            // Remettre dans l'ordre
+  MATCHING         // Associer éléments
+  DRAWING          // Dessin/tracé
+  TYPING           // Saisie libre
+}
+
+// ============================================================
+// SUIVI & PROGRESSION
+// ============================================================
+
+/// Tentative d'exercice par un élève
+/// Capture chaque essai pour analyser les erreurs
+model Attempt {
+  id         String @id @default(cuid())
+  studentId  String
+  exerciseId String
+  userId     String // Pour traçabilité (peut être parent qui aide)
+
+  // Résultat
+  answer      Json    // Réponse de l'élève
+  isCorrect   Boolean
+  score       Float   // Score 0-100
+  pointsEarned Int    @default(0)
+
+  // Analyse des erreurs
+  errors      Json?   // Détail des erreurs commises
+  errorCount  Int     @default(0)
+  hints       String[] // Indices utilisés
+
+  // Temps passé
+  startedAt   DateTime
+  completedAt DateTime
+  timeSpent   Int      // En secondes
+
+  // Difficulté au moment de la tentative
+  exerciseDifficulty Int
+  studentDifficulty  Int
+
+  createdAt DateTime @default(now())
+
+  student  StudentProfile @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  exercise Exercise       @relation(fields: [exerciseId], references: [id], onDelete: Cascade)
+  user     User           @relation(fields: [userId], references: [id])
+
+  @@index([studentId])
+  @@index([exerciseId])
+  @@index([userId])
+  @@index([createdAt])
+}
+
+/// Progression par compétence
+/// Agrégation des performances sur chaque compétence
+model Progress {
+  id        String @id @default(cuid())
+  studentId String
+  skillId   String
+
+  // Progression 0-100
+  level         Int   @default(0)
+  previousLevel Int   @default(0) // Pour calculer la delta
+
+  // Statistiques
+  totalAttempts    Int @default(0)
+  successfulAttempts Int @default(0)
+  totalErrors      Int @default(0)
+  averageScore     Float @default(0)
+
+  // Dernière activité
+  lastPracticedAt DateTime?
+
+  // Validation
+  isMastered Boolean @default(false) // Compétence maîtrisée (90%+)
+  masteredAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  student StudentProfile @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  skill   Skill          @relation(fields: [skillId], references: [id], onDelete: Cascade)
+
+  @@unique([studentId, skillId])
+  @@index([studentId])
+  @@index([skillId])
+}
+
+/// Évaluation formelle par le professeur
+/// Notes, commentaires, validation de compétences
+model Evaluation {
+  id         String @id @default(cuid())
+  studentId  String
+  teacherId  String
+  userId     String // Enseignant qui évalue
+
+  title      String
+  type       EvaluationType
+  
+  // Note et commentaire
+  score      Float? // Note sur 100
+  comment    String? @db.Text
+  feedback   String? @db.Text // Retour personnalisé
+
+  // Compétences évaluées
+  skillsEvaluated String[] // IDs des compétences
+
+  evaluatedAt DateTime @default(now())
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  student StudentProfile @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  teacher TeacherProfile @relation(fields: [teacherId], references: [id])
+  user    User           @relation(fields: [userId], references: [id])
+
+  @@index([studentId])
+  @@index([teacherId])
+  @@index([userId])
+}
+
+enum EvaluationType {
+  FORMATIVE   // Évaluation continue
+  SUMMATIVE   // Contrôle, examen
+  DIAGNOSTIC  // Test de positionnement
+}
+
+// ============================================================
+// MOTEUR D'ADAPTATION & RECOMMANDATIONS
+// ============================================================
+
+/// Recommandations personnalisées pour l'élève
+/// Générées par l'algorithme adaptatif
+model Recommendation {
+  id        String @id @default(cuid())
+  studentId String
+  userId    String // Généré pour qui (peut être vu par parent)
+
+  // Type et priorité
+  type     RecommendationType
+  priority Int                @default(50) // 0-100
+
+  // Contenu
+  title       String
+  description String
+  actionUrl   String? // Lien vers l'exercice/leçon recommandé
+
+  // IDs des ressources recommandées
+  recommendedExerciseIds String[] // IDs des exercices
+  recommendedLessonIds   String[] // IDs des leçons
+  recommendedSkillIds    String[] // IDs des compétences
+
+  // Statut
+  isViewed    Boolean @default(false)
+  isCompleted Boolean @default(false)
+  
+  expiresAt DateTime?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  student StudentProfile @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  user    User           @relation(fields: [userId], references: [id])
+
+  @@index([studentId])
+  @@index([userId])
+  @@index([createdAt])
+}
+
+enum RecommendationType {
+  REVIEW       // Revoir une compétence
+  PRACTICE     // S'entraîner davantage
+  ADVANCE      // Passer au niveau supérieur
+  REMEDIATION  // Remédiation (difficultés)
+  CHALLENGE    // Défi (élève avancé)
+}
+
+// ============================================================
+// ABONNEMENTS & PAIEMENTS (STRIPE)
+// ============================================================
+
+enum SubscriptionStatus {
+  TRIAL    // Période d'essai
+  ACTIVE   // Abonnement actif
+  PAST_DUE // Paiement en retard
+  CANCELED // Annulé
+  EXPIRED  // Expiré
+}
+
+/// Abonnement famille
+/// Un abonnement peut couvrir plusieurs enfants
+model Subscription {
+  id     String @id @default(cuid())
+  userId String // Parent souscripteur
+
+  // Stripe
+  stripeCustomerId     String? @unique
+  stripeSubscriptionId String? @unique
+  stripePriceId        String?
+
+  // Statut
+  status       SubscriptionStatus
+  currentPeriodStart DateTime?
+  currentPeriodEnd   DateTime?
+
+  // Limites
+  maxStudents Int @default(1) // Nb d'enfants couverts
+  features    String[] // ["unlimited_exercises", "parent_dashboard"]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  canceledAt DateTime?
+
+  @@index([userId])
+  @@index([stripeCustomerId])
+  @@index([stripeSubscriptionId])
+}
