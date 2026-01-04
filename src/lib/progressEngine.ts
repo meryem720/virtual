@@ -49,7 +49,7 @@ export interface AttemptResult {
   pointsEarned: number;
   recommendation?: RecommendationResult;
   shouldReviewLesson: boolean; // Doit revoir la leçon
-  needsRemediaton: boolean; // Besoin de remédiation
+  needsRemediation: boolean; // Besoin de remédiation
 }
 
 /**
@@ -254,7 +254,7 @@ export async function registerAttempt(
     pointsEarned,
     recommendation,
     shouldReviewLesson,
-    needsRemediaton: needsRemediation,
+    needsRemediation: needsRemediation,
   };
 }
 
