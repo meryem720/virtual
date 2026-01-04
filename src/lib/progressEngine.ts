@@ -106,7 +106,112 @@ const CONFIG = {
   BASE_POINTS: 10,
   BONUS_PERFECT: 5,
   BONUS_FAST: 3, // Si temps < estimation
+
+  // Adaptation de difficulté
+  DIFFICULTY_RANGE_TOLERANCE: 15, // Plage de tolérance pour chercher des exercices
+  DIFFICULTY_ADJUSTMENT_REMEDIATION: 20, // Réduction de difficulté en remédiation
+  DIFFICULTY_ADJUSTMENT_WARNING: 10, // Réduction de difficulté si difficultés
+  DIFFICULTY_ADJUSTMENT_SUCCESS: 10, // Augmentation si très bonne performance
+
+  // Niveaux de difficulté
+  DIFFICULTY_EASY_THRESHOLD: 35, // Exercices faciles
+  DIFFICULTY_HARD_THRESHOLD: 80, // Exercices difficiles
+  DIFFICULTY_MIN: 10, // Niveau minimum de difficulté
+  DIFFICULTY_MIN_WARNING: 15, // Niveau minimum si difficultés
+
+  // Durée par défaut
+  DEFAULT_LESSON_DURATION: 10, // Minutes par défaut si pas de leçon
+
+  // Seuils de score
+  SCORE_THRESHOLD_SUCCESS: 60, // Score minimum pour considérer comme réussi
 } as const;
+
+// ============================================================
+// FONCTIONS UTILITAIRES - EXERCICES
+// ============================================================
+
+/**
+ * Trouve les exercices dans une plage de difficulté donnée
+ */
+async function findExercisesByDifficulty(
+  skillId: string,
+  targetDifficulty: number,
+  excludeIds: string[] = [],
+  tolerance: number = CONFIG.DIFFICULTY_RANGE_TOLERANCE
+) {
+  return prisma.exercise.findMany({
+    where: {
+      skillId,
+      isPublished: true,
+      id: { notIn: excludeIds },
+      difficultyLevel: {
+        gte: targetDifficulty - tolerance,
+        lte: targetDifficulty + tolerance,
+      },
+    },
+    orderBy: { order: 'asc' },
+  });
+}
+
+/**
+ * Trouve l'exercice le plus proche d'une difficulté cible
+ */
+function findClosestExercise<T extends { difficultyLevel: number; id: string }>(
+  exercises: T[],
+  targetDifficulty: number
+): T | null {
+  if (exercises.length === 0) return null;
+
+  return exercises.reduce((closest, exercise) =>
+    Math.abs(exercise.difficultyLevel - targetDifficulty) <
+    Math.abs(closest.difficultyLevel - targetDifficulty)
+      ? exercise
+      : closest
+  );
+}
+
+/**
+ * Filtre les exercices par difficulté max/min
+ */
+function filterExercisesByDifficultyRange(
+  exercises: { difficultyLevel: number; id: string }[],
+  options: { min?: number; max?: number; limit?: number }
+): string[] {
+  let filtered = exercises;
+
+  if (options.min !== undefined) {
+    filtered = filtered.filter((ex) => ex.difficultyLevel >= options.min!);
+  }
+
+  if (options.max !== undefined) {
+    filtered = filtered.filter((ex) => ex.difficultyLevel <= options.max!);
+  }
+
+  const result = filtered.map((ex) => ex.id);
+
+  if (options.limit !== undefined) {
+    return result.slice(0, options.limit);
+  }
+
+  return result;
+}
+
+/**
+ * Calcule la difficulté cible basée sur le profil de l'élève
+ */
+function calculateTargetDifficulty(
+  profile: LearningProfile,
+  currentDifficulty: number
+): number {
+  if (profile.consecutiveErrors >= CONFIG.CONSECUTIVE_ERRORS_REMEDIATION) {
+    return Math.max(CONFIG.DIFFICULTY_MIN, currentDifficulty - CONFIG.DIFFICULTY_ADJUSTMENT_REMEDIATION);
+  } else if (profile.consecutiveErrors >= CONFIG.CONSECUTIVE_ERRORS_WARNING) {
+    return Math.max(CONFIG.DIFFICULTY_MIN_WARNING, currentDifficulty - CONFIG.DIFFICULTY_ADJUSTMENT_WARNING);
+  } else if (profile.recentSuccessRate > 0.85) {
+    return Math.min(100, currentDifficulty + CONFIG.DIFFICULTY_ADJUSTMENT_SUCCESS);
+  }
+  return currentDifficulty;
+}
 
 // ============================================================
 // FONCTIONS PRINCIPALES
@@ -139,7 +244,7 @@ export async function registerAttempt(
   }
 
   // 2. Calculer les points gagnés
-  const estimatedDuration = exercise.lesson?.estimatedDuration || 10; // Default 10 min if no lesson
+  const estimatedDuration = exercise.lesson?.estimatedDuration || CONFIG.DEFAULT_LESSON_DURATION;
   const pointsEarned = calculatePoints(input.score, input.timeSpent, estimatedDuration);
 
   // 3. Créer la tentative
@@ -300,7 +405,7 @@ async function updateProgress(
 
   // Calculer les nouvelles statistiques
   const newTotalAttempts = progress.totalAttempts + 1;
-  const newSuccessfulAttempts = progress.successfulAttempts + (score >= 60 ? 1 : 0);
+  const newSuccessfulAttempts = progress.successfulAttempts + (score >= CONFIG.SCORE_THRESHOLD_SUCCESS ? 1 : 0);
   const newTotalErrors = progress.totalErrors + errorCount;
   const newAverageScore =
     (progress.averageScore * progress.totalAttempts + score) / newTotalAttempts;
@@ -361,11 +466,8 @@ export async function getNextExercise(
   studentId: string,
   skillId: string
 ): Promise<string | null> {
-  const [student, progress, skill] = await Promise.all([
+  const [student, skill] = await Promise.all([
     prisma.studentProfile.findUnique({ where: { id: studentId } }),
-    prisma.progress.findUnique({
-      where: { studentId_skillId: { studentId, skillId } },
-    }),
     prisma.skill.findUnique({ where: { id: skillId } }),
   ]);
 
@@ -375,19 +477,8 @@ export async function getNextExercise(
   const recentAttempts = await getRecentAttempts(studentId, skillId, CONFIG.RECENT_ATTEMPTS_WINDOW);
   const profile = analyzeLearningProfile(recentAttempts, student);
 
-  // Déterminer la difficulté cible
-  let targetDifficulty = student.difficultyLevel;
-
-  if (profile.consecutiveErrors >= CONFIG.CONSECUTIVE_ERRORS_REMEDIATION) {
-    // Remédiation : exercices très faciles
-    targetDifficulty = Math.max(10, targetDifficulty - 20);
-  } else if (profile.consecutiveErrors >= CONFIG.CONSECUTIVE_ERRORS_WARNING) {
-    // Difficultés : exercices plus simples
-    targetDifficulty = Math.max(15, targetDifficulty - 10);
-  } else if (profile.recentSuccessRate > 0.85) {
-    // Très bonnes performances : augmenter
-    targetDifficulty = Math.min(100, targetDifficulty + 10);
-  }
+  // Calculer la difficulté cible
+  const targetDifficulty = calculateTargetDifficulty(profile, student.difficultyLevel);
 
   // Trouver les exercices déjà faits
   const completedExerciseIds = await prisma.attempt.findMany({
@@ -401,52 +492,18 @@ export async function getNextExercise(
 
   const completedIds = completedExerciseIds.map((a) => a.exerciseId);
 
-  // Chercher un exercice adapté
-  const exercises = await prisma.exercise.findMany({
-    where: {
-      skillId,
-      isPublished: true,
-      id: { notIn: completedIds },
-      difficultyLevel: {
-        gte: targetDifficulty - 15,
-        lte: targetDifficulty + 15,
-      },
-    },
-    orderBy: { order: 'asc' },
-  });
+  // Chercher un exercice adapté non complété
+  let exercises = await findExercisesByDifficulty(skillId, targetDifficulty, completedIds);
 
+  // Si aucun exercice non fait, permettre de refaire les exercices
   if (exercises.length === 0) {
-    // Si aucun exercice non fait, permettre de refaire les exercices
-    const allExercises = await prisma.exercise.findMany({
-      where: {
-        skillId,
-        isPublished: true,
-        difficultyLevel: {
-          gte: targetDifficulty - 15,
-          lte: targetDifficulty + 15,
-        },
-      },
-      orderBy: { order: 'asc' },
-    });
-
-    if (allExercises.length === 0) return null;
-
-    // Prendre celui le plus proche de la difficulté cible
-    return allExercises.reduce((closest, ex) =>
-      Math.abs(ex.difficultyLevel - targetDifficulty) <
-      Math.abs(closest.difficultyLevel - targetDifficulty)
-        ? ex
-        : closest
-    ).id;
+    exercises = await findExercisesByDifficulty(skillId, targetDifficulty);
+    if (exercises.length === 0) return null;
   }
 
-  // Prendre le premier exercice non fait le plus proche de la difficulté cible
-  return exercises.reduce((closest, ex) =>
-    Math.abs(ex.difficultyLevel - targetDifficulty) <
-    Math.abs(closest.difficultyLevel - targetDifficulty)
-      ? ex
-      : closest
-  ).id;
+  // Prendre l'exercice le plus proche de la difficulté cible
+  const closestExercise = findClosestExercise(exercises, targetDifficulty);
+  return closestExercise?.id || null;
 }
 
 /**
@@ -488,10 +545,10 @@ export async function generateRecommendation(
   switch (type) {
     case 'REMEDIATION':
       // Remédiation : cours obligatoire + exercices guidés très simples
-      const easyExercises = skill.exercises
-        .filter((ex) => ex.difficultyLevel <= 35)
-        .slice(0, 3)
-        .map((ex) => ex.id);
+      const easyExercises = filterExercisesByDifficultyRange(skill.exercises, {
+        max: CONFIG.DIFFICULTY_EASY_THRESHOLD,
+        limit: 3,
+      });
 
       recommendation = {
         type: 'REMEDIATION',
@@ -499,16 +556,16 @@ export async function generateRecommendation(
         description: `Tu as du mal avec "${skill.name}". C'est normal, c'est difficile ! Revoyons la leçon ensemble et refaisons des exercices plus simples. Tu vas y arriver ! 💪`,
         exerciseIds: easyExercises,
         lessonIds: lesson ? [lesson.id] : [],
-        priority: 100, // Priorité maximale
+        priority: 100,
       };
       break;
 
     case 'REVIEW':
       // Revoir le cours après 2 erreurs
-      const reviewExercises = skill.exercises
-        .filter((ex) => ex.difficultyLevel <= profile.difficultyLevel - 10)
-        .slice(0, 2)
-        .map((ex) => ex.id);
+      const reviewExercises = filterExercisesByDifficultyRange(skill.exercises, {
+        max: profile.difficultyLevel - CONFIG.DIFFICULTY_ADJUSTMENT_WARNING,
+        limit: 2,
+      });
 
       recommendation = {
         type: 'REVIEW',
@@ -522,14 +579,11 @@ export async function generateRecommendation(
 
     case 'PRACTICE':
       // Continue à pratiquer
-      const practiceExercises = skill.exercises
-        .filter(
-          (ex) =>
-            ex.difficultyLevel >= profile.difficultyLevel - 10 &&
-            ex.difficultyLevel <= profile.difficultyLevel + 10
-        )
-        .slice(0, 3)
-        .map((ex) => ex.id);
+      const practiceExercises = filterExercisesByDifficultyRange(skill.exercises, {
+        min: profile.difficultyLevel - CONFIG.DIFFICULTY_ADJUSTMENT_WARNING,
+        max: profile.difficultyLevel + CONFIG.DIFFICULTY_ADJUSTMENT_WARNING,
+        limit: 3,
+      });
 
       recommendation = {
         type: 'PRACTICE',
@@ -574,10 +628,10 @@ export async function generateRecommendation(
 
     case 'CHALLENGE':
       // Proposer un défi CM1 (extension future)
-      const hardExercises = skill.exercises
-        .filter((ex) => ex.difficultyLevel >= 80)
-        .slice(0, 2)
-        .map((ex) => ex.id);
+      const hardExercises = filterExercisesByDifficultyRange(skill.exercises, {
+        min: CONFIG.DIFFICULTY_HARD_THRESHOLD,
+        limit: 2,
+      });
 
       recommendation = {
         type: 'CHALLENGE',
@@ -585,7 +639,7 @@ export async function generateRecommendation(
         description: `Tu es très fort sur "${skill.name}" ! Je te propose un défi plus difficile. Pas d'inquiétude, ce n'est pas obligatoire, c'est juste pour t'amuser ! 🎪`,
         exerciseIds: hardExercises,
         lessonIds: [],
-        priority: 50, // Non prioritaire
+        priority: 50,
       };
       break;
 
